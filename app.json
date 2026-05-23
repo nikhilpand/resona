@@ -8,7 +8,12 @@
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.resona.app"
+      "bundleIdentifier": "com.resona.app",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ]
+      }
     },
     "android": {
       "package": "com.resona.app",
@@ -16,20 +21,23 @@
         "backgroundColor": "#0a0a0f",
         "foregroundImage": "./assets/resona-logo.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-font",
-      [
-        "react-native-track-player",
-        {
-          "ios": { "audioBackgroundMode": true },
-          "android": { "foregroundServiceType": "mediaPlayback" }
-        }
-      ]
-    ]
+      "expo-font"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "331284d6-9cfc-450e-a5cb-b957b60109e4"
+      }
+    },
+    "owner": "nikhilpandeyy"
   }
 }
