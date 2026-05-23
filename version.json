@@ -1,0 +1,8 @@
+{
+  "version": "0.1.0",
+  "versionCode": 100,
+  "buildNumber": 100,
+  "bumpType": "minor",
+  "releaseDate": "2026-05-23",
+  "gitSha": "initial"
+}

@@ -1,0 +1,118 @@
+##############################################################################
+# Resona — Nightly Dev Build
+#
+# Runs every day at 02:00 UTC (7:30 AM IST) and on manual trigger.
+# Builds a preview APK from the latest main branch for internal testing.
+# Does NOT create a GitHub Release — only uploads as an artifact.
+##############################################################################
+name: 🌙 Nightly Dev Build
+
+on:
+  schedule:
+    - cron: '0 2 * * *'    # 02:00 UTC = 07:30 IST daily
+  workflow_dispatch:
+    inputs:
+      notify:
+        description: 'Send Slack notification?'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+
+env:
+  EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+jobs:
+  nightly-build:
+    name: 🌙 Nightly Preview APK
+    runs-on: ubuntu-latest
+    # Only run if there were commits in the last 24h
+    steps:
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: 🔍 Check for recent commits
+        id: check
+        run: |
+          LAST_COMMIT_TIME=$(git log -1 --format='%ct')
+          NOW=$(date +%s)
+          DIFF=$((NOW - LAST_COMMIT_TIME))
+          
+          if [ $DIFF -gt 86400 ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "No commits in last 24h — skipping nightly build."
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "Commits detected — proceeding with nightly build."
+          fi
+
+      - name: 🟢 Setup Node 20
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        if: steps.check.outputs.skip != 'true'
+        run: npm ci --prefer-offline
+
+      - name: 🛠️ Install EAS CLI
+        if: steps.check.outputs.skip != 'true'
+        run: npm install -g eas-cli@latest
+
+      - name: 🏗️ EAS Build (preview profile)
+        if: steps.check.outputs.skip != 'true'
+        id: build
+        run: |
+          BUILD_OUTPUT=$(eas build \
+            --platform android \
+            --profile preview \
+            --non-interactive \
+            --json \
+            --wait)
+          
+          APK_URL=$(echo "$BUILD_OUTPUT" | node -p "
+            const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));
+            const build = Array.isArray(data) ? data[0] : data;
+            build.artifacts?.applicationArchiveUrl || build.artifactUrl || ''
+          ")
+          
+          echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
+
+      - name: 📥 Download nightly APK
+        if: steps.check.outputs.skip != 'true' && steps.build.outputs.apk_url != ''
+        run: |
+          DATE=$(date +%Y-%m-%d)
+          SHA=$(git rev-parse --short HEAD)
+          APK_NAME="Resona-nightly-${DATE}-${SHA}.apk"
+          curl -L "${{ steps.build.outputs.apk_url }}" -o "$APK_NAME"
+          echo "APK_NAME=$APK_NAME" >> $GITHUB_ENV
+          ls -lh "$APK_NAME"
+
+      - name: 📤 Upload nightly APK (30-day retention)
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: resona-nightly-${{ github.run_number }}
+          path: "Resona-nightly-*.apk"
+          retention-days: 30
+
+      - name: 📋 Nightly summary
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🌙 Nightly Build — $(date +%Y-%m-%d)
+          
+          | Field | Value |
+          |-------|-------|
+          | **Commit** | $(git rev-parse --short HEAD) |
+          | **Branch** | main |
+          | **Profile** | preview |
+          | **Artifact** | ${{ env.APK_NAME }} |
+          | **Expires** | 30 days |
+          
+          Download the APK from the **Artifacts** section above.
+          EOF

@@ -1,0 +1,139 @@
+##############################################################################
+# Resona — OTA Update (Over-The-Air)
+#
+# Triggers:
+#   - Push to `main`   → publishes to "production" EAS channel
+#   - Manual dispatch  → can target any channel
+#
+# What it does:
+#   1. Bumps patch version automatically
+#   2. Commits version bump back to main
+#   3. Runs `eas update` to push a new JS bundle OTA
+#      (users get it automatically next time they open the app)
+##############################################################################
+name: 📡 OTA Update
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.github/**'
+      - 'scripts/**'
+      - 'backend/**'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'EAS Update channel'
+        required: true
+        default: 'production'
+        type: choice
+        options: [production, preview, development]
+      message:
+        description: 'Update message (shown in Expo dashboard)'
+        required: false
+        default: 'OTA: manual update'
+      bump_type:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options: [patch, minor, major]
+
+concurrency:
+  group: ota-${{ github.ref }}
+  cancel-in-progress: false  # Never cancel in-flight OTA pushes
+
+env:
+  EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+jobs:
+  ota-update:
+    name: 📡 Push OTA Bundle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to push version bump commit
+
+    steps:
+      - name: ⬇️ Checkout (full history for changelog)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🟢 Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci --prefer-offline
+
+      # ── Auto version bump ──────────────────────────────────────────────────
+      - name: 🔢 Bump version (patch by default)
+        id: version
+        run: |
+          BUMP="${{ github.event.inputs.bump_type || 'patch' }}"
+          node scripts/bump-version.js $BUMP
+
+      - name: 📝 Read new version
+        id: read_version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "New version: $VERSION"
+
+      # ── Commit version bump ────────────────────────────────────────────────
+      - name: 🔖 Commit version bump
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(release): v${{ steps.read_version.outputs.version }} [skip ci]"
+          file_pattern: "package.json app.json version.json"
+          commit_user_name: "resona-bot"
+          commit_user_email: "bot@resona.app"
+          tagging_message: ""  # Don't create tags for OTA bumps
+
+      # ── Install EAS CLI ────────────────────────────────────────────────────
+      - name: 🛠️ Install EAS CLI
+        run: npm install -g eas-cli@latest
+
+      # ── Authenticate with Expo ─────────────────────────────────────────────
+      - name: 🔐 Verify Expo auth
+        run: eas whoami
+
+      # ── Push OTA update ────────────────────────────────────────────────────
+      - name: 📡 Publish EAS Update
+        id: ota
+        run: |
+          CHANNEL="${{ github.event.inputs.channel || 'production' }}"
+          MESSAGE="${{ github.event.inputs.message || format('OTA v{0} — {1}', steps.read_version.outputs.version, github.sha) }}"
+          
+          eas update \
+            --channel "$CHANNEL" \
+            --message "$MESSAGE" \
+            --non-interactive \
+            --json \
+            | tee eas-update-output.json
+          
+          UPDATE_ID=$(cat eas-update-output.json | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'))[0]?.id || 'unknown'")
+          echo "update_id=$UPDATE_ID" >> $GITHUB_OUTPUT
+          echo "✅ OTA published: $UPDATE_ID"
+
+      # ── Summary ───────────────────────────────────────────────────────────
+      - name: 📋 Job Summary
+        run: |
+          VERSION="${{ steps.read_version.outputs.version }}"
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 📡 OTA Update Published
+          
+          | Field | Value |
+          |-------|-------|
+          | **Version** | v${VERSION} |
+          | **Channel** | ${{ github.event.inputs.channel || 'production' }} |
+          | **Update ID** | ${{ steps.ota.outputs.update_id }} |
+          | **Triggered by** | ${{ github.actor }} |
+          | **Commit** | ${{ github.sha }} |
+          
+          Users will receive this update automatically when they next open Resona.
+          EOF

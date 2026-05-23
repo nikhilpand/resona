@@ -1,0 +1,65 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
+node_modules/
+backend/node_modules/
+
+# ── Expo ──────────────────────────────────────────────────────────────────────
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# ── Native build outputs ───────────────────────────────────────────────────────
+/ios
+/android
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# ── Metro ─────────────────────────────────────────────────────────────────────
+.metro-health-check*
+
+# ── Debug logs ────────────────────────────────────────────────────────────────
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+*.pem
+
+# ── Environment / secrets (NEVER commit these) ────────────────────────────────
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# ── TypeScript ────────────────────────────────────────────────────────────────
+*.tsbuildinfo
+
+# ── Redis / DB local data ─────────────────────────────────────────────────────
+*.rdb
+dump.rdb
+
+# ── Backend build ─────────────────────────────────────────────────────────────
+backend/dist/
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Internal agent files ──────────────────────────────────────────────────────
+antigravity-god-mode/
+.claude/
+CLAUDE.md
+plans/
+templates/
+vivi_music_app_plan.html
+vivi_music_deep_reference.html

@@ -1,0 +1,312 @@
+##############################################################################
+# Resona — APK Build & GitHub Release
+#
+# Triggers:
+#   - Tag push:    v*.*.* (e.g. v1.2.3)
+#   - Manual:      workflow_dispatch with profile choice
+#
+# Pipeline:
+#   1. Auto version bump & tag (if manual trigger without tag)
+#   2. Generate changelog from git commits since last tag
+#   3. Build signed APK via EAS Build (remote Expo servers)
+#   4. Download APK artifact
+#   5. Create GitHub Release with APK + changelog
+#   6. Update release channel (triggers OTA for existing users)
+##############################################################################
+name: 🏗️ Build APK & Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'        # v1.0.0, v0.2.1, etc.
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc*'    # v1.0.0-rc1 pre-releases
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'EAS Build profile'
+        required: true
+        default: 'preview'
+        type: choice
+        options: [preview, production]
+      bump_type:
+        description: 'Version bump (ignored if tag push)'
+        required: true
+        default: 'minor'
+        type: choice
+        options: [patch, minor, major]
+      prerelease:
+        description: 'Mark as pre-release?'
+        required: true
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+      dry_run:
+        description: 'Dry run (skip EAS build & release)?'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+  BUILD_PROFILE: ${{ github.event.inputs.profile || 'production' }}
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  prepare:
+    name: 📋 Prepare Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_code: ${{ steps.version.outputs.version_code }}
+      tag_name: ${{ steps.version.outputs.tag_name }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      changelog: ${{ steps.changelog.outputs.changelog }}
+
+    steps:
+      - name: ⬇️ Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🟢 Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci --prefer-offline
+
+      # ── If triggered by workflow_dispatch (not a tag push), bump version ────
+      - name: 🔢 Bump version (manual trigger only)
+        if: github.event_name == 'workflow_dispatch'
+        run: node scripts/bump-version.js ${{ github.event.inputs.bump_type }}
+
+      # ── Read the final version ─────────────────────────────────────────────
+      - name: 📋 Read version metadata
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          VERSION_CODE=$(node -p "require('./version.json').versionCode || 1" 2>/dev/null || echo "1")
+          TAG_NAME="v${VERSION}"
+          
+          # Detect pre-release from tag name or input
+          IS_PRE=false
+          if [[ "${{ github.ref }}" == *"-rc"* ]] || [[ "${{ github.event.inputs.prerelease }}" == "true" ]]; then
+            IS_PRE=true
+          fi
+          
+          echo "version=$VERSION"         >> $GITHUB_OUTPUT
+          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+          echo "tag_name=$TAG_NAME"       >> $GITHUB_OUTPUT
+          echo "is_prerelease=$IS_PRE"    >> $GITHUB_OUTPUT
+          
+          echo "📦 Version: $VERSION (code: $VERSION_CODE)"
+          echo "🏷️ Tag: $TAG_NAME | Pre-release: $IS_PRE"
+
+      # ── Commit version files & create tag (manual trigger) ─────────────────
+      - name: 🏷️ Commit & tag (manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "resona-bot"
+          git config user.email "bot@resona.app"
+          git add package.json app.json version.json
+          git commit -m "chore(release): v${{ steps.version.outputs.version }} [skip ci]" || true
+          git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
+          git push origin HEAD:main --follow-tags
+
+      # ── Generate changelog ─────────────────────────────────────────────────
+      - name: 📝 Generate changelog
+        id: changelog
+        run: |
+          # Get previous tag for range
+          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+' | sed -n '2p' || echo "")
+          echo "Previous tag: ${PREV_TAG:-'(none — first release)'}"
+          
+          node scripts/generate-changelog.js "$PREV_TAG" HEAD > CHANGELOG_RELEASE.md
+          cat CHANGELOG_RELEASE.md
+          
+          # Store for GitHub Release body (multiline)
+          {
+            echo 'changelog<<CHANGELOG_EOF'
+            cat CHANGELOG_RELEASE.md
+            echo 'CHANGELOG_EOF'
+          } >> $GITHUB_OUTPUT
+
+      - name: 📤 Upload changelog artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: changelog
+          path: CHANGELOG_RELEASE.md
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-android:
+    name: 🤖 Build Android APK
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: github.event.inputs.dry_run != 'true'
+
+    steps:
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || 'main' }}
+
+      - name: 🟢 Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: ☕ Setup Java 17 (for local Android builds)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 📦 Install dependencies
+        run: npm ci --prefer-offline
+
+      - name: 🛠️ Install EAS CLI
+        run: npm install -g eas-cli@latest
+
+      - name: 🔐 Verify Expo auth
+        run: eas whoami
+
+      # ── Build APK on EAS servers ───────────────────────────────────────────
+      - name: 🏗️ EAS Build (Android ${{ env.BUILD_PROFILE }})
+        id: eas_build
+        run: |
+          echo "Building profile: $BUILD_PROFILE"
+          
+          BUILD_OUTPUT=$(eas build \
+            --platform android \
+            --profile "$BUILD_PROFILE" \
+            --non-interactive \
+            --json \
+            --wait)
+          
+          echo "$BUILD_OUTPUT" | tee eas-build-result.json
+          
+          # Extract artifact URL from EAS JSON output
+          APK_URL=$(echo "$BUILD_OUTPUT" | node -p "
+            const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));
+            const build = Array.isArray(data) ? data[0] : data;
+            build.artifacts?.applicationArchiveUrl || build.artifactUrl || ''
+          ")
+          
+          BUILD_ID=$(echo "$BUILD_OUTPUT" | node -p "
+            const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));
+            const build = Array.isArray(data) ? data[0] : data;
+            build.id || 'unknown'
+          ")
+          
+          echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+          echo "✅ Build complete: $BUILD_ID"
+          echo "📥 APK URL: $APK_URL"
+
+      # ── Download the APK from EAS CDN ──────────────────────────────────────
+      - name: 📥 Download APK artifact
+        run: |
+          APK_URL="${{ steps.eas_build.outputs.apk_url }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
+          APK_NAME="Resona-v${VERSION}.apk"
+          
+          if [ -z "$APK_URL" ]; then
+            echo "::error::No APK URL returned from EAS build!"
+            exit 1
+          fi
+          
+          curl -L "$APK_URL" -o "$APK_NAME"
+          ls -lh "$APK_NAME"
+          echo "APK_NAME=$APK_NAME" >> $GITHUB_ENV
+
+      - name: 📤 Upload APK artifact (for release job)
+        uses: actions/upload-artifact@v4
+        with:
+          name: resona-apk
+          path: "Resona-v${{ needs.prepare.outputs.version }}.apk"
+          retention-days: 30
+
+      - name: 📋 Build summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🤖 Android Build Complete
+          
+          | Field | Value |
+          |-------|-------|
+          | **APK Version** | v${{ needs.prepare.outputs.version }} |
+          | **versionCode** | ${{ needs.prepare.outputs.version_code }} |
+          | **EAS Build ID** | ${{ steps.eas_build.outputs.build_id }} |
+          | **Profile** | ${{ env.BUILD_PROFILE }} |
+          | **File** | ${{ env.APK_NAME }} |
+          EOF
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  release:
+    name: 🚀 GitHub Release
+    runs-on: ubuntu-latest
+    needs: [prepare, build-android]
+    if: github.event.inputs.dry_run != 'true'
+    permissions:
+      contents: write
+
+    steps:
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v4
+
+      - name: 📥 Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: resona-apk
+          path: ./release-assets
+
+      - name: 📥 Download changelog
+        uses: actions/download-artifact@v4
+        with:
+          name: changelog
+          path: ./release-assets
+
+      - name: 🔍 List release assets
+        run: ls -lh ./release-assets/
+
+      # ── Create GitHub Release ──────────────────────────────────────────────
+      - name: 🚀 Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          name: "🎵 Resona ${{ needs.prepare.outputs.tag_name }}"
+          body: ${{ needs.prepare.outputs.changelog }}
+          prerelease: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
+          draft: false
+          files: |
+            ./release-assets/*.apk
+          generate_release_notes: false
+          make_latest: ${{ needs.prepare.outputs.is_prerelease == 'false' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🎉 Release summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🎉 Release Published!
+          
+          **[Resona ${{ needs.prepare.outputs.tag_name }}](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.tag_name }})**
+          
+          | Field | Value |
+          |-------|-------|
+          | **Version** | ${{ needs.prepare.outputs.tag_name }} |
+          | **Pre-release** | ${{ needs.prepare.outputs.is_prerelease }} |
+          | **Profile** | ${{ env.BUILD_PROFILE }} |
+          | **Actor** | ${{ github.actor }} |
+          EOF

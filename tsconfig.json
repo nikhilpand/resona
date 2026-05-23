@@ -1,0 +1,13 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true
+  },
+  "exclude": [
+    "node_modules",
+    "antigravity-god-mode",
+    "plans",
+    "templates",
+    "backend"
+  ]
+}

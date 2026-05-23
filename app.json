@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Resona",
+    "slug": "resona",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/resona-logo.png",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.resona.app"
+    },
+    "android": {
+      "package": "com.resona.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0a0a0f",
+        "foregroundImage": "./assets/resona-logo.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-font",
+      [
+        "react-native-track-player",
+        {
+          "ios": { "audioBackgroundMode": true },
+          "android": { "foregroundServiceType": "mediaPlayback" }
+        }
+      ]
+    ]
+  }
+}

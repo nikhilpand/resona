@@ -1,0 +1,67 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Resona — EAS Build Configuration
+# Profiles: development | preview | production
+# ──────────────────────────────────────────────────────────────────────────────
+{
+  "cli": {
+    "version": ">= 12.0.0",
+    "requireCommit": true
+  },
+  "build": {
+    # ── Local dev build (runs on your machine, no EAS server) ──────────────────
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk",
+        "gradleCommand": ":app:assembleDebug"
+      },
+      "ios": {
+        "simulator": true
+      },
+      "env": {
+        "APP_ENV": "development"
+      }
+    },
+
+    # ── Preview / staging (internal distribution APK) ─────────────────────────
+    "preview": {
+      "distribution": "internal",
+      "channel": "preview",
+      "android": {
+        "buildType": "apk"
+      },
+      "ios": {
+        "simulator": false
+      },
+      "env": {
+        "APP_ENV": "preview"
+      }
+    },
+
+    # ── Production (signed APK/AAB for Play Store or direct install) ──────────
+    "production": {
+      "distribution": "store",
+      "channel": "production",
+      "android": {
+        "buildType": "apk",
+        "credentialsSource": "remote"
+      },
+      "ios": {
+        "credentialsSource": "remote"
+      },
+      "env": {
+        "APP_ENV": "production"
+      }
+    }
+  },
+
+  "submit": {
+    "production": {
+      "android": {
+        "serviceAccountKeyPath": "./google-play-service-account.json",
+        "track": "internal"
+      }
+    }
+  }
+}

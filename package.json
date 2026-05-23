@@ -1,0 +1,49 @@
+{
+  "name": "resona",
+  "version": "0.1.0",
+  "description": "Resona — a premium open-source music super-app built with Expo + React Native",
+  "main": "index.ts",
+  "dependencies": {
+    "@expo-google-fonts/dm-sans": "^0.4.2",
+    "@expo-google-fonts/dm-serif-display": "^0.4.2",
+    "@react-navigation/bottom-tabs": "^7.16.1",
+    "@react-navigation/native": "^7.2.4",
+    "@shopify/react-native-skia": "^2.6.3",
+    "expo": "~56.0.4",
+    "expo-auth-session": "~56.0.11",
+    "expo-crypto": "~56.0.3",
+    "expo-font": "~56.0.5",
+    "expo-secure-store": "~56.0.4",
+    "expo-sqlite": "^56.0.4",
+    "expo-status-bar": "~56.0.4",
+    "lucide-react-native": "^1.16.0",
+    "react": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-reanimated": "^4.3.1",
+    "react-native-safe-area-context": "^5.8.0",
+    "react-native-screens": "^4.25.2",
+    "react-native-track-player": "^4.1.2",
+    "zustand": "^5.0.13"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3",
+    "eas-cli": "latest"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "version:patch": "node scripts/bump-version.js patch",
+    "version:minor": "node scripts/bump-version.js minor",
+    "version:major": "node scripts/bump-version.js major",
+    "version:auto": "node scripts/bump-version.js",
+    "changelog": "node scripts/generate-changelog.js",
+    "build:preview": "eas build --platform android --profile preview",
+    "build:prod": "eas build --platform android --profile production",
+    "ota": "eas update --channel production --message",
+    "release": "node scripts/bump-version.js minor && git add -A && git commit -m 'chore(release): v$(node -p require(\"./package.json\").version)' && git push --follow-tags"
+  },
+  "private": true
+}
