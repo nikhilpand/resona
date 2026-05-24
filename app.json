@@ -3,6 +3,10 @@
     "name": "Resona",
     "slug": "resona",
     "version": "1.0.0",
+    "platforms": [
+      "ios",
+      "android"
+    ],
     "orientation": "portrait",
     "icon": "./assets/resona-logo.png",
     "userInterfaceStyle": "dark",

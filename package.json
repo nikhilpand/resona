@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Resona — a premium open-source music super-app built with Expo + React Native",
   "main": "index.ts",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "dependencies": {
     "@expo-google-fonts/dm-sans": "^0.4.2",
     "@expo-google-fonts/dm-serif-display": "^0.4.2",
@@ -26,6 +29,7 @@
     "react-native-screens": "^4.25.2",
     "react-native-svg": "15.15.4",
     "react-native-track-player": "^4.1.2",
+    "react-native-worklets": "0.8.3",
     "zustand": "^5.0.13"
   },
   "devDependencies": {
