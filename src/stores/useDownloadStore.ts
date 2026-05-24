@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { db } from '../db/client';
 import { BACKEND_BASE_URL, BACKEND_API_KEY, DownloadQuality } from '../config';
 import { LyricsClient } from '../services/lyrics/LyricsClient';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

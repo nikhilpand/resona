@@ -26,7 +26,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Theme, PantoneColors } from '../theme/colors';
 import { Typography } from '../theme/typography';
-import { useDownloadStore, DownloadEntry } from '../stores/useDownloadStore';
+import { useDownloadStore, DownloadItem as DownloadItemType } from '../stores/useDownloadStore';
 import { useThemeStore } from '../stores/useThemeStore';
 
 interface DownloadsScreenProps {
@@ -53,8 +53,8 @@ const DownloadProgressBar = React.memo(({
     width: `${animatedWidth.value}%`,
   }));
 
-  const isComplete = status === 'completed';
-  const hasError = status === 'error';
+  const isComplete = status === 'complete';
+  const hasError = status === 'failed';
   const barColor = hasError
     ? PantoneColors.fiesta
     : isComplete
@@ -81,7 +81,7 @@ const DownloadItem = React.memo(({
   onCancel,
   onRemove,
 }: {
-  entry: DownloadEntry;
+  entry: DownloadItemType;
   accentColor: string;
   onCancel: () => void;
   onRemove: () => void;
@@ -89,17 +89,17 @@ const DownloadItem = React.memo(({
   const STATUS_ICONS: Record<string, React.ReactNode> = {
     pending: <Clock size={14} color={PantoneColors.paleViolet} />,
     downloading: <Download size={14} color={accentColor} />,
-    completed: <CheckCircle size={14} color={PantoneColors.greenery} />,
-    error: <AlertCircle size={14} color={PantoneColors.fiesta} />,
-    cancelled: <X size={14} color="rgba(255,255,255,0.3)" />,
+    transcoding: <Download size={14} color={accentColor} />,
+    complete: <CheckCircle size={14} color={PantoneColors.greenery} />,
+    failed: <AlertCircle size={14} color={PantoneColors.fiesta} />,
   };
 
   const STATUS_LABELS: Record<string, string> = {
     pending: 'Queued',
     downloading: `${Math.round(entry.progress * 100)}%`,
-    completed: 'Downloaded',
-    error: 'Failed',
-    cancelled: 'Cancelled',
+    transcoding: 'Transcoding...',
+    complete: 'Downloaded',
+    failed: 'Failed',
   };
 
   const qualityLabel =
@@ -115,19 +115,9 @@ const DownloadItem = React.memo(({
     <View style={styles.itemCard}>
       {/* Album Art */}
       <View style={styles.itemArtContainer}>
-        {entry.artwork ? (
-          <Image source={{ uri: entry.artwork }} style={styles.itemArt} />
-        ) : (
-          <View style={[styles.itemArtPlaceholder, { backgroundColor: accentColor + '20' }]}>
-            <Music size={16} color={accentColor} />
-          </View>
-        )}
-        {/* Lyrics badge */}
-        {entry.lyricsOffline && (
-          <View style={[styles.lyricsBadge, { backgroundColor: accentColor }]}>
-            <Text style={styles.lyricsBadgeText}>L</Text>
-          </View>
-        )}
+        <View style={[styles.itemArtPlaceholder, { backgroundColor: accentColor + '20' }]}>
+          <Music size={16} color={accentColor} />
+        </View>
       </View>
 
       {/* Info */}
@@ -136,10 +126,10 @@ const DownloadItem = React.memo(({
         <Text style={styles.itemArtist} numberOfLines={1}>{entry.artist || 'Unknown Artist'}</Text>
 
         {/* Progress bar (only for active/failed states) */}
-        {(entry.status === 'downloading' || entry.status === 'completed' || entry.status === 'error') && (
+        {(entry.status === 'downloading' || entry.status === 'complete' || entry.status === 'failed') && (
           <View style={styles.progressContainer}>
             <DownloadProgressBar
-              progress={entry.status === 'completed' ? 1 : entry.progress}
+              progress={entry.status === 'complete' ? 1 : entry.progress}
               color={accentColor}
               status={entry.status}
             />
@@ -151,17 +141,14 @@ const DownloadItem = React.memo(({
           {STATUS_ICONS[entry.status]}
           <Text style={[
             styles.statusText,
-            entry.status === 'completed' && { color: PantoneColors.greenery },
-            entry.status === 'error' && { color: PantoneColors.fiesta },
+            entry.status === 'complete' && { color: PantoneColors.greenery },
+            entry.status === 'failed' && { color: PantoneColors.fiesta },
           ]}>
             {STATUS_LABELS[entry.status]}
           </Text>
           <Text style={styles.qualityTag}>{qualityLabel}</Text>
-          {fileSizeMB && entry.status === 'completed' && (
+          {fileSizeMB && entry.status === 'complete' && (
             <Text style={styles.fileSizeText}>{fileSizeMB} MB</Text>
-          )}
-          {entry.lyricsOffline && (
-            <Text style={[styles.qualityTag, { color: accentColor }]}>+ Lyrics</Text>
           )}
         </View>
       </View>
@@ -186,16 +173,24 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onClose }) => 
   const downloads = useDownloadStore((s) => s.downloads);
   const cancelDownload = useDownloadStore((s) => s.cancelDownload);
   const removeDownload = useDownloadStore((s) => s.removeDownload);
-  const storageStats = useDownloadStore((s) => s.storageStats);
-  const refreshStats = useDownloadStore((s) => s.refreshStats);
+  const loadDownloads = useDownloadStore((s) => s.loadDownloads);
+  const getStorageStats = useDownloadStore((s) => s.getStorageStats);
+
+  const [storageStats, setStorageStats] = React.useState({ cachedSizeMB: 0, availableMB: 0 });
 
   useEffect(() => {
-    refreshStats();
+    loadDownloads();
+    getStorageStats().then((stats) => {
+      setStorageStats({
+        cachedSizeMB: stats.totalCachedBytes / (1024 * 1024),
+        availableMB: stats.availableDiskBytes / (1024 * 1024),
+      });
+    });
   }, []);
 
-  const downloadList = Object.values(downloads);
+  const downloadList = downloads;
   const activeCount = downloadList.filter((d) => d.status === 'downloading').length;
-  const completedCount = downloadList.filter((d) => d.status === 'completed').length;
+  const completedCount = downloadList.filter((d) => d.status === 'complete').length;
 
   const handleClearCompleted = () => {
     Alert.alert(
@@ -208,7 +203,7 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onClose }) => 
           style: 'destructive',
           onPress: () => {
             downloadList
-              .filter((d) => d.status === 'completed' || d.status === 'error' || d.status === 'cancelled')
+              .filter((d) => d.status === 'complete' || d.status === 'failed')
               .forEach((d) => removeDownload(d.trackId));
           },
         },

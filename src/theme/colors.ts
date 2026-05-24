@@ -13,6 +13,7 @@ export const Theme = {
   dark: {
     background: PantoneColors.obsidian,
     surface: PantoneColors.deepNavy,
+    card: PantoneColors.deepNavy,
     primary: PantoneColors.mediumSlate,
     secondary: PantoneColors.ultraViolet,
     accent: PantoneColors.crystalBlue,

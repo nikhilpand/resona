@@ -12,6 +12,7 @@ export const Typography = {
   sizes: {
     xs: 11,
     sm: 13,
+    md: 15,
     base: 15,
     lg: 18,
     xl: 22,
