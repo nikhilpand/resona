@@ -9,10 +9,14 @@ jobs:
   build:
     name: Build Android APK
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: ⬇️ Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for changelog generation
 
       - name: 🟢 Setup Node 20
         uses: actions/setup-node@v4
@@ -31,9 +35,13 @@ jobs:
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 
-      - name: 📥 Download & upload APK
+      - name: 📥 Download APK
         run: |
           APK_URL=$(eas build:list --platform android --limit 1 --json --non-interactive | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'))[0]?.artifacts?.applicationArchiveUrl || ''")
+          if [ -z "$APK_URL" ]; then
+            echo "Error: No application archive URL found. The build may have failed."
+            exit 1
+          fi
           curl -L "$APK_URL" -o resona.apk
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -44,3 +52,21 @@ jobs:
           name: resona-apk-${{ github.run_number }}
           path: resona.apk
           retention-days: 30
+
+      - name: 📝 Generate Changelog
+        run: node scripts/generate-changelog.js > CHANGELOG.md
+
+      - name: 🔑 Get version from package.json
+        id: get_version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: 🚀 Create or Update GitHub Release
+        run: |
+          gh release create "v${{ steps.get_version.outputs.version }}" resona.apk \
+            --title "Resona v${{ steps.get_version.outputs.version }}" \
+            --notes-file CHANGELOG.md \
+            --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
