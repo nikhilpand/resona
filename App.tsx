@@ -26,7 +26,16 @@ export default function App() {
     async function setupPlayer() {
       try {
         // Initialize react-native-track-player options
+        // setupPlayer throws if already initialized (e.g. HMR) — that's fine
         await TrackPlayer.setupPlayer({});
+      } catch (err: any) {
+        // "already been initialized" is not a real error
+        if (!err?.message?.includes('already')) {
+          console.warn('[App] TrackPlayer.setupPlayer error:', err);
+        }
+      }
+
+      try {
         await TrackPlayer.updateOptions({
           capabilities: [
             Capability.Play,
@@ -40,14 +49,19 @@ export default function App() {
             Capability.Pause,
           ],
         });
-        
+      } catch (err) {
+        console.warn('[App] TrackPlayer.updateOptions error:', err);
+      }
+
+      try {
         // Initialize Zustand playback store listeners
         await initializeStore();
-        
-        setPlayerReady(true);
       } catch (err) {
-        console.log('Player setup error:', err);
+        console.warn('[App] initializeStore error:', err);
       }
+
+      // Always unblock the UI — a degraded app is better than an infinite spinner
+      setPlayerReady(true);
     }
     setupPlayer();
   }, [initializeStore]);

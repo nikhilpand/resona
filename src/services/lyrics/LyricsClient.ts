@@ -3,7 +3,7 @@ import { LrcParser, LyricLine } from './LrcParser';
 
 export interface LyricsResponse {
   lyrics: LyricLine[];
-  source: 'database' | 'lrclib' | 'kugou' | 'mock';
+  source: 'database' | 'lrclib' | 'kugou' | 'simpmusic' | 'youlyplus' | 'mock';
 }
 
 export class LyricsClient {
@@ -34,8 +34,20 @@ export class LyricsClient {
         }
       }
 
-      // 2. Query LRCLib API
-      console.log(`[LyricsClient] Cache miss. Fetching from LRCLib for: ${title}`);
+      // 2. Query SimpMusic Lyrics API (precise match by YouTube videoId)
+      console.log(`[LyricsClient] Fetching from SimpMusic for videoId: ${trackId}`);
+      const simpMusicData = await this.fetchFromSimpMusic(trackId, durationSec);
+      if (simpMusicData) {
+        const parsed = LrcParser.parse(simpMusicData);
+        await this.cacheLyrics(trackId, parsed, 'simpmusic');
+        return {
+          lyrics: parsed,
+          source: 'simpmusic',
+        };
+      }
+
+      // 3. Query LRCLib API
+      console.log(`[LyricsClient] Fetching from LRCLib for: ${title}`);
       const lrcLibData = await this.fetchFromLrcLib(artist, title, durationSec);
       if (lrcLibData) {
         const parsed = LrcParser.parse(lrcLibData);
@@ -46,8 +58,20 @@ export class LyricsClient {
         };
       }
 
-      // 3. Fallback to Kugou Search API
-      console.log(`[LyricsClient] LRCLib miss. Fetching from Kugou for: ${title}`);
+      // 4. Query YouLyPlus KPoe API
+      console.log(`[LyricsClient] Fetching from YouLyPlus for: ${title}`);
+      const youLyPlusData = await this.fetchFromYouLyPlus(artist, title, durationSec);
+      if (youLyPlusData) {
+        const parsed = LrcParser.parse(youLyPlusData);
+        await this.cacheLyrics(trackId, parsed, 'youlyplus');
+        return {
+          lyrics: parsed,
+          source: 'youlyplus',
+        };
+      }
+
+      // 5. Fallback to Kugou Search API
+      console.log(`[LyricsClient] Fetching from Kugou for: ${title}`);
       const kugouData = await this.fetchFromKugou(artist, title);
       if (kugouData) {
         const parsed = LrcParser.parse(kugouData);
@@ -134,6 +158,177 @@ export class LyricsClient {
     } catch {
       return null;
     }
+  }
+
+  private static async fetchWithTimeout(url: string, options: any = {}): Promise<Response> {
+    const { timeout = 6000, ...fetchOptions } = options;
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    return fetch(url, {
+      ...fetchOptions,
+      signal: controller.signal
+    }).finally(() => {
+      clearTimeout(id);
+    });
+  }
+
+  /**
+   * Fetches lyrics from SimpMusic Lyrics API using the exact YouTube videoId.
+   */
+  private static async fetchFromSimpMusic(videoId: string, durationSec?: number): Promise<string | null> {
+    try {
+      const urls = [
+        `https://api-lyrics.simpmusic.org/v1/${videoId}`,
+        `https://vivi-yt-music-server.onrender.com/v1/${videoId}`
+      ];
+
+      for (const url of urls) {
+        try {
+          const response = await this.fetchWithTimeout(url, { timeout: 6000 });
+          if (!response.ok) continue;
+
+          const data = await response.json();
+          if (data && data.success && Array.isArray(data.data)) {
+            const tracks = data.data;
+            if (tracks.length === 0) continue;
+
+            const duration = durationSec || 0;
+            const validTracks = duration > 0 
+              ? tracks.filter((t: any) => Math.abs((t.duration || 0) - duration) <= 10)
+              : tracks;
+
+            if (validTracks.length === 0) continue;
+
+            let bestMatch = validTracks[0];
+            if (duration > 0 && validTracks.length > 1) {
+              let minDiff = Math.abs((validTracks[0].duration || 0) - duration);
+              for (const track of validTracks) {
+                const diff = Math.abs((track.duration || 0) - duration);
+                if (diff < minDiff) {
+                  minDiff = diff;
+                  bestMatch = track;
+                }
+              }
+            }
+
+            const lyrics = bestMatch.richSyncLyrics || bestMatch.syncedLyrics || bestMatch.plainLyrics;
+            if (lyrics && lyrics.trim().length > 0) {
+              console.log(`[LyricsClient] SimpMusic succeeded for ${videoId}`);
+              return lyrics;
+            }
+          }
+        } catch (_) {
+          // ignore and try next fallback url
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
+  /**
+   * Fetches lyrics from YouLyPlus / LyricsPlus servers in parallel, returning the first success.
+   */
+  private static async fetchFromYouLyPlus(artist: string, title: string, durationSec?: number): Promise<string | null> {
+    const servers = [
+      "https://lyricsplus.prjktla.my.id",
+      "https://lyricsplus.atomix.one",
+      "https://lyricsplus.binimum.org",
+      "https://lyricsplus.prjktla.workers.dev",
+      "https://lyricsplus-seven.vercel.app",
+      "https://lyrics-plus-backend.vercel.app"
+    ];
+
+    const duration = durationSec ? Math.round(durationSec) : 0;
+    const queryParams = new URLSearchParams({
+      title,
+      artist,
+      duration: duration.toString()
+    });
+
+    const fetchPromises = servers.map(async (server) => {
+      try {
+        const url = `${server.replace(/\/$/, '')}/v2/lyrics/get?${queryParams.toString()}`;
+        const response = await this.fetchWithTimeout(url, { timeout: 6000 });
+        if (!response.ok) throw new Error("Request failed");
+
+        const data = await response.json();
+        
+        let lrc = data.syncedLyrics;
+        if (!lrc && Array.isArray(data.lyrics) && data.lyrics.length > 0) {
+          lrc = this.convertToLrc(data.lyrics);
+        }
+        if (!lrc) {
+          lrc = data.plainLyrics;
+        }
+
+        if (lrc && lrc.trim().length > 0) {
+          return lrc;
+        }
+        throw new Error("No lyrics in response");
+      } catch (err) {
+        throw err;
+      }
+    });
+
+    try {
+      // Racing promises
+      const result = await new Promise<string>((resolve, reject) => {
+        let rejectedCount = 0;
+        fetchPromises.forEach((p) => {
+          p.then(resolve).catch(() => {
+            rejectedCount++;
+            if (rejectedCount === fetchPromises.length) {
+              reject(new Error("All YouLyPlus servers failed"));
+            }
+          });
+        });
+      });
+      console.log(`[LyricsClient] YouLyPlus succeeded`);
+      return result;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Helper to convert YouLyPlus structured lyrics to standard LRC format
+   */
+  private static convertToLrc(lyricsItems: any[]): string | null {
+    try {
+      return lyricsItems.map((item) => {
+        const lineTime = item.time || 0;
+        const lineTimestamp = this.formatTime(lineTime);
+        const bgMarker = item.syllabus?.some((s: any) => s.isBackground === true) ? "{bg}" : "";
+
+        if (Array.isArray(item.syllabus) && item.syllabus.length > 0) {
+          let sb = lineTimestamp + bgMarker;
+          for (const syl of item.syllabus) {
+            const sylTime = syl.time || 0;
+            const sylTimestamp = this.formatTime(sylTime, true);
+            sb += sylTimestamp + (syl.text || "");
+            if (!syl.text?.endsWith(" ")) {
+              sb += " ";
+            }
+          }
+          return sb.trim();
+        } else {
+          return lineTimestamp + bgMarker + (item.text || "");
+        }
+      }).join("\n");
+    } catch {
+      return null;
+    }
+  }
+
+  private static formatTime(timeMs: number, isSyllable = false): string {
+    const minutes = Math.floor((timeMs / 1000) / 60);
+    const seconds = Math.floor((timeMs / 1000) % 60);
+    const millis = timeMs % 1000;
+    const prefix = isSyllable ? "<" : "[";
+    const suffix = isSyllable ? ">" : "]";
+    return `${prefix}${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${millis.toString().padStart(3, '0')}${suffix}`;
   }
 
   /**

@@ -31,8 +31,8 @@ interface DownloadState {
   /** Global download quality preference. */
   quality: DownloadQuality;
 
-  /** Active download abort controllers for cancellation. */
-  _abortControllers: Map<string, AbortController>;
+  /** Active polling timers for cancellation. */
+  _pollTimers: Map<string, ReturnType<typeof setTimeout>>;
 
   // ─── Actions ───────────────────────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ interface DownloadState {
   /** Set global download quality preference. */
   setQuality: (quality: DownloadQuality) => void;
 
-  /** Queue a track for download (enqueue to backend BullMQ). */
+  /** Queue a track for download. */
   queueDownload: (
     trackId: string,
     title: string,
@@ -78,12 +78,70 @@ async function ensureDownloadsDir(): Promise<void> {
   }
 }
 
+// ─── Poll helper ─────────────────────────────────────────────────────────────
+
+/**
+ * Polls the backend job status endpoint until the job is complete or failed.
+ * Uses exponential backoff: 2s, 4s, 6s, 8s… capped at 15s, max 40 attempts (~10 min).
+ */
+async function pollJobUntilComplete(
+  trackId: string,
+  quality: string,
+  onProgress: (progress: number) => void,
+  cancelSignal: { cancelled: boolean }
+): Promise<{ downloadUrl: string } | null> {
+  const MAX_ATTEMPTS = 40;
+  const BASE_DELAY_MS = 2000;
+  const MAX_DELAY_MS = 15000;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    if (cancelSignal.cancelled) return null;
+
+    try {
+      const resp = await fetch(
+        `${BACKEND_BASE_URL}/api/download/${trackId}/status?quality=${quality}`,
+        { headers: { 'x-api-key': BACKEND_API_KEY } }
+      );
+
+      if (resp.ok) {
+        const data = await resp.json();
+        const { status, progress, downloadUrl } = data;
+
+        if (status === 'complete' && downloadUrl) {
+          onProgress(1.0);
+          return { downloadUrl };
+        }
+
+        if (status === 'failed') {
+          throw new Error(data.error || 'Backend download job failed');
+        }
+
+        // Still in progress — update progress (maps 0-100 → 0.05–0.90)
+        if (typeof progress === 'number') {
+          onProgress(0.05 + (progress / 100) * 0.85);
+        }
+      }
+    } catch (err: any) {
+      if (err.message?.includes('failed')) throw err; // propagate real failures
+      // Network error — keep retrying
+    }
+
+    const delay = Math.min(BASE_DELAY_MS + attempt * 1000, MAX_DELAY_MS);
+    await new Promise((r) => setTimeout(r, delay));
+  }
+
+  throw new Error('Download timed out after 10 minutes');
+}
+
 // ─── Store ───────────────────────────────────────────────────────────────────
+
+// Track cancel signals outside of store to avoid Zustand proxy issues
+const _cancelSignals = new Map<string, { cancelled: boolean }>();
 
 export const useDownloadStore = create<DownloadState>((set, get) => ({
   downloads: [],
   quality: 'high',
-  _abortControllers: new Map(),
+  _pollTimers: new Map(),
 
   loadDownloads: async () => {
     try {
@@ -116,9 +174,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
   queueDownload: async (trackId, title, artist, artwork, duration) => {
     const { quality, downloads } = get();
 
-    // Skip if already queued or completed
+    // Skip if already queued or completed successfully
     if (downloads.some((d) => d.trackId === trackId && d.status !== 'failed')) {
-      console.log(`[DownloadStore] Track ${trackId} already in queue, skipping.`);
+      console.log(`[DownloadStore] Track ${trackId} already queued, skipping.`);
       return;
     }
 
@@ -143,61 +201,72 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       fileSize: null,
       error: null,
     };
-    set((state) => ({ downloads: [newItem, ...state.downloads.filter((d) => d.trackId !== trackId)] }));
+    set((state) => ({
+      downloads: [newItem, ...state.downloads.filter((d) => d.trackId !== trackId)],
+    }));
 
-    // 3. Start the download via backend BullMQ API
+    // 3. Create cancel signal
+    const cancelSignal = { cancelled: false };
+    _cancelSignals.set(trackId, cancelSignal);
+
+    // 4. Enqueue to backend (start the job)
     try {
-      const abortController = new AbortController();
-      get()._abortControllers.set(trackId, abortController);
-
-      // Notify backend to enqueue the download job
-      const response = await fetch(`${BACKEND_BASE_URL}/api/download`, {
+      const enqueueResp = await fetch(`${BACKEND_BASE_URL}/api/download`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': BACKEND_API_KEY,
         },
         body: JSON.stringify({ trackId, quality }),
-        signal: abortController.signal,
       });
 
-      if (!response.ok) {
-        throw new Error(`Backend enqueue failed: ${response.statusText}`);
+      if (!enqueueResp.ok) {
+        throw new Error(`Backend enqueue failed: ${enqueueResp.statusText}`);
       }
 
-      const data = await response.json();
-      const downloadUrl = data.downloadUrl;
-
-      if (!downloadUrl) {
-        throw new Error('No download URL returned from backend');
-      }
-
-      // 4. Update status to downloading
+      // 5. Update status to downloading
       set((state) => ({
         downloads: state.downloads.map((d) =>
           d.trackId === trackId ? { ...d, status: 'downloading' as const } : d
         ),
       }));
-      await db.run(
-        `UPDATE downloads SET status = 'downloading' WHERE trackId = ?`,
-        [trackId]
-      );
+      await db.run(`UPDATE downloads SET status = 'downloading' WHERE trackId = ?`, [trackId]);
 
-      // 5. Download the transcoded file to local storage
-      const ext = quality === 'lossless' ? 'flac' : 'mp3';
-      const destPath = `${DOWNLOADS_DIR}${trackId}.${ext}`;
-
-      const downloadResumable = FileSystem.createDownloadResumable(
-        downloadUrl,
-        destPath,
-        {},
-        (downloadProgress) => {
-          const progress =
-            downloadProgress.totalBytesWritten /
-            downloadProgress.totalBytesExpectedToWrite;
+      // 6. Poll backend until job completes (the file is being processed server-side)
+      const result = await pollJobUntilComplete(
+        trackId,
+        quality,
+        (progress) => {
           set((state) => ({
             downloads: state.downloads.map((d) =>
               d.trackId === trackId ? { ...d, progress } : d
+            ),
+          }));
+        },
+        cancelSignal
+      );
+
+      if (!result || cancelSignal.cancelled) {
+        console.log(`[DownloadStore] Download cancelled: ${title}`);
+        return;
+      }
+
+      // 7. Download the completed file from backend to device storage
+      const ext = quality === 'lossless' ? 'opus' : quality === 'low' ? 'aac' : 'mp3';
+      const destPath = `${DOWNLOADS_DIR}${trackId}.${ext}`;
+
+      const downloadResumable = FileSystem.createDownloadResumable(
+        result.downloadUrl,
+        destPath,
+        {},
+        (downloadProgress) => {
+          const fileProgress = downloadProgress.totalBytesExpectedToWrite > 0
+            ? downloadProgress.totalBytesWritten / downloadProgress.totalBytesExpectedToWrite
+            : 0;
+          // Map 90–100%
+          set((state) => ({
+            downloads: state.downloads.map((d) =>
+              d.trackId === trackId ? { ...d, progress: 0.90 + fileProgress * 0.10 } : d
             ),
           }));
         }
@@ -205,14 +274,14 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
 
       const downloadResult = await downloadResumable.downloadAsync();
       if (!downloadResult) {
-        throw new Error('Download returned no result');
+        throw new Error('FileSystem download returned no result');
       }
 
-      // 6. Get file size
+      // 8. Get file size
       const fileInfo = await FileSystem.getInfoAsync(destPath);
       const fileSize = fileInfo.exists ? (fileInfo as any).size || 0 : 0;
 
-      // 7. Update completion status
+      // 9. Mark complete
       set((state) => ({
         downloads: state.downloads.map((d) =>
           d.trackId === trackId
@@ -225,13 +294,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
         [destPath, fileSize, Date.now(), trackId]
       );
 
-      // 8. Also download lyrics for offline use
-      get().downloadLyrics(trackId, artist, title, duration);
+      // 10. Cache lyrics in background (non-blocking)
+      get().downloadLyrics(trackId, artist, title, duration).catch(() => {});
 
-      get()._abortControllers.delete(trackId);
+      _cancelSignals.delete(trackId);
       console.log(`[DownloadStore] Download complete: ${title}`);
     } catch (err: any) {
-      if (err.name === 'AbortError') {
+      if (cancelSignal.cancelled) {
         console.log(`[DownloadStore] Download cancelled: ${title}`);
         return;
       }
@@ -248,15 +317,16 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
         `UPDATE downloads SET status = 'failed', error = ? WHERE trackId = ?`,
         [err.message, trackId]
       );
-      get()._abortControllers.delete(trackId);
+      _cancelSignals.delete(trackId);
     }
   },
 
   cancelDownload: async (trackId) => {
-    const controller = get()._abortControllers.get(trackId);
-    if (controller) {
-      controller.abort();
-      get()._abortControllers.delete(trackId);
+    // Signal any in-flight poll loop to stop
+    const signal = _cancelSignals.get(trackId);
+    if (signal) {
+      signal.cancelled = true;
+      _cancelSignals.delete(trackId);
     }
 
     await db.run(`DELETE FROM downloads WHERE trackId = ?`, [trackId]);
@@ -264,15 +334,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       downloads: state.downloads.filter((d) => d.trackId !== trackId),
     }));
 
-    // Clean up file if it exists
+    // Clean up any partial local files
     try {
-      const filePath = `${DOWNLOADS_DIR}${trackId}.*`;
-      // Try common extensions
-      for (const ext of ['mp3', 'flac', 'aac']) {
-        const path = `${DOWNLOADS_DIR}${trackId}.${ext}`;
-        const info = await FileSystem.getInfoAsync(path);
+      for (const ext of ['mp3', 'flac', 'aac', 'opus', 'tmp']) {
+        const p = `${DOWNLOADS_DIR}${trackId}.${ext}`;
+        const info = await FileSystem.getInfoAsync(p);
         if (info.exists) {
-          await FileSystem.deleteAsync(path, { idempotent: true });
+          await FileSystem.deleteAsync(p, { idempotent: true });
         }
       }
     } catch (_) {
@@ -281,6 +349,17 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
   },
 
   removeDownload: async (trackId) => {
+    // Also clean up local file
+    try {
+      const item = get().downloads.find((d) => d.trackId === trackId);
+      if (item?.filePath) {
+        const info = await FileSystem.getInfoAsync(item.filePath);
+        if (info.exists) {
+          await FileSystem.deleteAsync(item.filePath, { idempotent: true });
+        }
+      }
+    } catch (_) {}
+
     await db.run(`DELETE FROM downloads WHERE trackId = ?`, [trackId]);
     set((state) => ({
       downloads: state.downloads.filter((d) => d.trackId !== trackId),
@@ -306,14 +385,12 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     try {
       await ensureDownloadsDir();
 
-      // Count completed downloads
       const rows = await db.execute(
         `SELECT COUNT(*) as cnt, SUM(fileSize) as totalSize FROM downloads WHERE status = 'complete'`
       );
       const downloadedCount = rows[0]?.cnt || 0;
       const totalCachedBytes = rows[0]?.totalSize || 0;
 
-      // Get available disk space
       const diskInfo = await FileSystem.getFreeDiskStorageAsync();
 
       return {
@@ -329,14 +406,12 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
 
   clearCache: async () => {
     try {
-      // Delete all download files
       const info = await FileSystem.getInfoAsync(DOWNLOADS_DIR);
       if (info.exists) {
         await FileSystem.deleteAsync(DOWNLOADS_DIR, { idempotent: true });
-        await ensureDownloadsDir(); // Recreate empty directory
+        await ensureDownloadsDir();
       }
 
-      // Reset database entries
       await db.run(`DELETE FROM downloads`);
       set({ downloads: [] });
 

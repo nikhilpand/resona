@@ -15,13 +15,13 @@ interface PlaybackState {
   playbackState: State;
   playbackPosition: number;
   playbackDuration: number;
-  
+
   // Custom Visualizer & Lyrics state
   visualizerBass: number;
   visualizerMid: number;
   visualizerTreble: number;
   currentLyricLineIndex: number;
-  
+
   // Actions
   initializeStore: () => Promise<void>;
   setQueue: (tracks: Track[]) => Promise<void>;
@@ -55,10 +55,12 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     });
 
     TrackPlayer.addEventListener(Event.PlaybackActiveTrackChanged, (event) => {
-      set({ 
+      set({
         activeTrack: event.track || null,
-        currentLyricLineIndex: -1 
+        currentLyricLineIndex: -1,
       });
+      // Clear pre-resolve tracking so next track gets a fresh resolution
+      ResolvingDataSource.clearTracking();
     });
 
     // Clear any previous interval (safety for HMR)
@@ -145,29 +147,41 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
 
   playTrack: async (trackIndex) => {
     const queue = get().queue;
-    if (trackIndex >= 0 && trackIndex < queue.length) {
-      const track = queue[trackIndex];
-      try {
-        const resolvedUrl = await ResolvingDataSource.resolveTrack(track);
-        
-        const updatedTrack = { ...track, url: resolvedUrl };
+    if (trackIndex < 0 || trackIndex >= queue.length) return;
 
-        // Update local queue representation
-        const updatedQueue = [...queue];
-        updatedQueue[trackIndex] = updatedTrack;
-        set({ queue: updatedQueue });
+    const track = queue[trackIndex];
 
-        // Update player queue by inserting new resolved track and removing old
-        const currentQueue = await TrackPlayer.getQueue();
-        if (trackIndex < currentQueue.length) {
-          await TrackPlayer.add(updatedTrack, trackIndex);
-          await TrackPlayer.remove(trackIndex + 1);
-        }
-      } catch (err) {
-        console.warn('[PlaybackStore] Failed to resolve play track URL:', err);
+    try {
+      const resolvedUrl = await ResolvingDataSource.resolveTrack(track);
+      const updatedTrack = { ...track, url: resolvedUrl };
+
+      // Update local queue representation
+      const updatedQueue = [...queue];
+      updatedQueue[trackIndex] = updatedTrack;
+      set({ queue: updatedQueue });
+
+      // Get current active index to decide on replacement strategy
+      const activeIndex = await TrackPlayer.getActiveTrackIndex();
+      const currentQueue = await TrackPlayer.getQueue();
+
+      if (trackIndex === activeIndex) {
+        // Replacing the actively playing track — use load() to avoid glitching
+        await TrackPlayer.load(updatedTrack);
+      } else if (trackIndex < currentQueue.length) {
+        // Non-active track — safe to insert & remove
+        await TrackPlayer.add(updatedTrack, trackIndex);
+        await TrackPlayer.remove(trackIndex + 1);
       }
+    } catch (err) {
+      console.warn('[PlaybackStore] Failed to resolve/replace track URL:', err);
     }
-    await TrackPlayer.skip(trackIndex);
+
+    // Skip and play regardless of resolution result
+    try {
+      await TrackPlayer.skip(trackIndex);
+    } catch (_) {
+      // Already at the right index or queue has only one item
+    }
     await TrackPlayer.play();
   },
 
@@ -190,6 +204,5 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
 
   setLyricIndex: (index) => {
     set({ currentLyricLineIndex: index });
-  }
+  },
 }));
-
